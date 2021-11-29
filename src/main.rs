@@ -1,11 +1,10 @@
-#![allow()]
-
 use crate::commands::run_command;
 use crate::messages::{format_message, print_message, send_user_message};
 use crate::user_config::{get_client_config, set_client_config};
 use crate::user_interface::home_screen;
 use std::{io::stdout, io::Write, sync::Arc};
-use termion::{input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
+use termion::input::TermRead;
+use termion::{raw::IntoRawMode, screen::AlternateScreen};
 use tokio::{select, sync::broadcast, sync::RwLock};
 use twitch_irc::{login::StaticLoginCredentials, SecureTCPTransport, TwitchIRCClient};
 
@@ -88,7 +87,7 @@ pub async fn main() -> std::io::Result<()> {
         // Set terminal to raw mode to allow reading
         // stdin one key at a time.
         let mut stdout = stdout().into_raw_mode().unwrap();
-        let mut stdin = std::io::stdin().keys();
+        let mut stdin = termion::async_stdin().keys();
         let mut buffer_position = input_buffer.read().await.len();
 
         loop {
