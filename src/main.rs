@@ -2,10 +2,9 @@ use crate::commands::run_command;
 use crate::messages::{format_message, print_message, send_user_message};
 use crate::user_config::{get_client_config, set_client_config};
 use crate::user_interface::home_screen;
-use std::{io::stdout, io::Write, sync::Arc};
-use termion::input::TermRead;
-use termion::{raw::IntoRawMode, screen::AlternateScreen};
-use tokio::{select, sync::broadcast, sync::RwLock};
+use std::{io::stdout, io::Write, sync::{Arc, mpsc::{self, TryRecvError}}};
+use termion::{input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
+use tokio::{select, sync::broadcast, sync::RwLock, task};
 use twitch_irc::{login::StaticLoginCredentials, SecureTCPTransport, TwitchIRCClient};
 
 mod commands;
@@ -82,6 +81,9 @@ pub async fn main() -> std::io::Result<()> {
         }
     });
 
+    // Use this channel to send/receive termion::Event::Key
+    let (input_tx, input_rx) = mpsc::channel();
+
     // Second tokio task to listen to user input and outgoing chat messages.
     let join_handle2 = tokio::spawn(async move {
         // Set terminal to raw mode to allow reading
@@ -91,86 +93,92 @@ pub async fn main() -> std::io::Result<()> {
         let mut buffer_position = input_buffer.read().await.len();
 
         loop {
+            let key = loop {
+                match input_rx.try_recv() {
+                    Err(TryRecvError::Empty) => {}, // no op, keep trying to read from channel
+                    Err(TryRecvError::Disconnected) => unimplemented!(), // What should we do if one part of the channel disconnects?
+                    Ok(code) => break code,
+                }
+                task::yield_now().await;
+            };
+
             // TODO: Look into thread spawn or tokio::Stdin, .next() poss blocking main thread.
             // TODO: Also look into poss channel, maybe abstract some of the pattern 
             // matching?
-            let input = stdin.next();
             let first_char = input_buffer.read().await.chars().nth(0);
-            if let Some(Ok(key)) = input {
-                match key {
-                   termion::event::Key::Char('\n') => {
-                        if !input_buffer.read().await.is_empty() {
-                            if first_char == Some(':') {
-                                // If the entered input buffer starts with a ':'
-                                // then the run_command function is executed,
-                                // parsing the command and running its logic.
-                                command_tx.send(()).ok();
-                            } else {
-                                send_user_message(
-                                    user_name.read().await.as_str(),
-                                    current_channel.read().await.as_str(),
-                                    Arc::clone(&input_buffer),
-                                    &client2,
-                                )
+            match key {
+                termion::event::Key::Char('\n') => {
+                    if !input_buffer.read().await.is_empty() {
+                        if first_char == Some(':') {
+                            // If the entered input buffer starts with a ':'
+                            // then the run_command function is executed,
+                            // parsing the command and running its logic.
+                            command_tx.send(()).ok();
+                        } else {
+                            send_user_message(
+                                user_name.read().await.as_str(),
+                                current_channel.read().await.as_str(),
+                                Arc::clone(&input_buffer),
+                                &client2,
+                            )
                                 .await;
-                            }
+                        }
+                        user_interface::empty_line();
+                    }
+                }
+                termion::event::Key::Char(user_input) => {
+                    // write user input to the console
+                    // and save it to input_buffer
+                    if !input_buffer.read().await.is_empty() {
+                        write!(stdout, "{}", user_input).unwrap();
+                    } else {
+                        write!(stdout, "{}{}", termion::clear::AfterCursor, user_input)
+                            .unwrap();
+                    }
+                    input_buffer.write().await.push(user_input);
+                    buffer_position += 1;
+                }
+                termion::event::Key::Left => {
+                    if buffer_position == 0 {
+                    } else {
+                        write!(stdout, "{}", termion::cursor::Left(1)).unwrap();
+                        buffer_position -= 1;
+                    }
+                }
+                termion::event::Key::Right => {
+                    if buffer_position == input_buffer.read().await.len() {
+                    } else {
+                        write!(stdout, "{}", termion::cursor::Right(1)).unwrap();
+                        buffer_position += 1;
+                    }
+                }
+                termion::event::Key::Backspace => {
+                    // Backspace does nothing unless the input_buffer
+                    // has characters to delete.
+                    if !input_buffer.read().await.is_empty() {
+                        input_buffer.write().await.pop();
+                        write!(
+                            stdout,
+                            "{}{}",
+                            termion::cursor::Left(1),
+                            termion::clear::AfterCursor
+                        )
+                            .unwrap();
+                        buffer_position -= 1;
+                        if input_buffer.read().await.is_empty() {
                             user_interface::empty_line();
                         }
                     }
-                    termion::event::Key::Char(user_input) => {
-                        // write user input to the console
-                        // and save it to input_buffer
-                        if !input_buffer.read().await.is_empty() {
-                            write!(stdout, "{}", user_input).unwrap();
-                        } else {
-                            write!(stdout, "{}{}", termion::clear::AfterCursor, user_input)
-                                .unwrap();
-                        }
-                        input_buffer.write().await.push(user_input);
-                        buffer_position += 1;
-                    }
-                    termion::event::Key::Left => {
-                        if buffer_position == 0 {
-                        } else {
-                            write!(stdout, "{}", termion::cursor::Left(1)).unwrap();
-                            buffer_position -= 1;
-                        }
-                    }
-                    termion::event::Key::Right => {
-                        if buffer_position == input_buffer.read().await.len() {
-                        } else {
-                            write!(stdout, "{}", termion::cursor::Right(1)).unwrap();
-                            buffer_position += 1;
-                        }
-                    }
-                    termion::event::Key::Backspace => {
-                        // Backspace does nothing unless the input_buffer
-                        // has characters to delete.
-                        if !input_buffer.read().await.is_empty() {
-                            input_buffer.write().await.pop();
-                            write!(
-                                stdout,
-                                "{}{}",
-                                termion::cursor::Left(1),
-                                termion::clear::AfterCursor
-                            )
-                            .unwrap();
-                            buffer_position -= 1;
-                            if input_buffer.read().await.is_empty() {
-                                user_interface::empty_line();
-                            }
-                        }
-                    }
-                    termion::event::Key::Ctrl('q') => {
-                        // Send message to receivers to end process.
-                        shutdown_tx.send(()).ok();
-                        break;
-                    }
- 
-                    _ => {}
                 }
-                stdout.lock().flush().unwrap();
+                termion::event::Key::Ctrl('q') => {
+                    // Send message to receivers to end process.
+                    shutdown_tx.send(()).ok();
+                    break;
+                }
+
+                _ => {}
             }
+            stdout.lock().flush().unwrap();
         }
     });
 
@@ -179,16 +187,33 @@ pub async fn main() -> std::io::Result<()> {
             select! {
                     // if a command ':' is found in a sent input buffer,
                     // call run_command to parse the input and handle the command
-                    Ok(_command) = command_rx.recv() => { run_command(
-                        Arc::clone(&input_buffer_lock),
-                        Arc::clone(&current_channel_read),
-                        &config_path,
-                        &client
+                    Ok(_command) = command_rx.recv() => {
+                        run_command(
+                            Arc::clone(&input_buffer_lock),
+                            Arc::clone(&current_channel_read),
+                            &config_path,
+                            &client
                         ).await
                 },
                      // End process if sender message received.
                     _ = shutdown_rx2.recv() => break,
             };
+        }
+    });
+
+    let input_reader_tx = input_tx.clone();
+    let _input_reader = std::thread::spawn(move || {
+        loop {
+            let keys = std::io::stdin().keys();
+            for key in keys {
+                // `key` can be an Err variant, are we gonna handle those?
+                if let Ok(code) = key {
+                    if let Err(_error) = input_reader_tx.send(code) {
+                        // What do we do if an error happens?
+                        unimplemented!();
+                    };
+                }
+            }
         }
     });
 
