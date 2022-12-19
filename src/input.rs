@@ -1,4 +1,5 @@
 #[derive(Default)]
+
 pub struct InputBuffer {
     input: String,
     position: usize,

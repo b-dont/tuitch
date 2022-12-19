@@ -228,5 +228,4 @@ pub async fn send_user_message(
         buffer.to_string()
     );
     buffer.clear();
-    print!("{}\r> ", termion::clear::CurrentLine);
 }

@@ -89,14 +89,16 @@ pub async fn main() -> std::io::Result<()> {
         // Set terminal to raw mode to allow reading
         // stdin one key at a time.
         let mut stdout = stdout().into_raw_mode().unwrap();
-        let mut stdin = termion::async_stdin().keys();
-        let mut buffer_position = input_buffer.read().await.len();
+        let mut buffer_position = input_buffer.read().await.chars().count();
 
         loop {
             let key = loop {
                 match input_rx.try_recv() {
-                    Err(TryRecvError::Empty) => {}, // no op, keep trying to read from channel
-                    Err(TryRecvError::Disconnected) => unimplemented!(), // What should we do if one part of the channel disconnects?
+                    // no op, keep trying to read from channel
+                    Err(TryRecvError::Empty) => {},                     
+
+                    // What should we do if one part of the channel disconnects?
+                    Err(TryRecvError::Disconnected) => unimplemented!(), 
                     Ok(code) => break code,
                 }
                 task::yield_now().await;
@@ -124,6 +126,7 @@ pub async fn main() -> std::io::Result<()> {
                                 .await;
                         }
                         user_interface::empty_line();
+                        buffer_position = 0;
                     }
                 }
                 termion::event::Key::Char(user_input) => {
@@ -135,22 +138,24 @@ pub async fn main() -> std::io::Result<()> {
                         write!(stdout, "{}{}", termion::clear::AfterCursor, user_input)
                             .unwrap();
                     }
+                    if buffer_position < input_buffer.read().await.chars().count() {
+                       input_buffer.write().await.insert(buffer_position, user_input);
+                       write!(stdout, "{}", user_input).unwrap();
+                    }
                     input_buffer.write().await.push(user_input);
                     buffer_position += 1;
                 }
                 termion::event::Key::Left => {
-                    if buffer_position == 0 {
-                    } else {
+                    if buffer_position > 0 {
                         write!(stdout, "{}", termion::cursor::Left(1)).unwrap();
                         buffer_position -= 1;
-                    }
+                    } else {}
                 }
                 termion::event::Key::Right => {
-                    if buffer_position == input_buffer.read().await.len() {
-                    } else {
+                    if buffer_position < input_buffer.read().await.len() {
                         write!(stdout, "{}", termion::cursor::Right(1)).unwrap();
                         buffer_position += 1;
-                    }
+                    } else {}
                 }
                 termion::event::Key::Backspace => {
                     // Backspace does nothing unless the input_buffer
